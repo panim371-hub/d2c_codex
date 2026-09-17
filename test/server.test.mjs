@@ -1,0 +1,75 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { ROOT } from '../src/config.mjs';
+import { createServer } from '../src/server.mjs';
+import http from 'node:http';
+import { product, imageBytes } from './helpers.mjs';
+
+test('local HTTP workflow persists data, stages actual files and refuses cross-origin mutations',async t=>{
+  const base=path.join(ROOT,'.test-output');fs.mkdirSync(base,{recursive:true});const dir=fs.mkdtempSync(path.join(base,'http-'));
+  const instagramCalls=[];
+  let instagramState={status:'NOT_CONFIGURED',message:'login required'};
+  const instagram={status:()=>instagramState,start:(_dir,input)=>{instagramCalls.push(input);return{status:'STARTING',...input};}};
+  const aiCalls=[],ai={status:()=>({status:'NOT_CONFIGURED',authenticated:false,message:'login required'}),start:(_dir,input)=>{aiCalls.push(input);return{status:'STARTING',...input};},login:()=>({status:'AUTHENTICATING'})};
+  const {server}=createServer({dataDir:dir,config:{storeId:'test',storeName:'test',clientId:'',clientSecret:''},allowSettings:false,instagram,ai});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));fs.rmSync(dir,{recursive:true,force:true});});
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  const first=await fetch(origin+'/api/state').then(r=>r.json());assert.deepEqual(first.products,[]);assert.deepEqual(first.trends,[]);assert.equal(first.config.configured,false);assert.equal(first.instagram.status,'NOT_CONFIGURED');assert.equal(first.ai.authenticated,false);
+  assert.equal((await fetch(origin+'/')).status,200);
+  assert.match((await fetch(origin+'/js/dashboard.js')).headers.get('content-type'),/^text\/javascript/);
+  assert.match((await fetch(origin+'/css/dashboard.css')).headers.get('content-type'),/^text\/css/);
+  assert.equal((await fetch(origin+'/.env')).status,404);
+  // Undici rewrites Host; use the actual HTTP client to test DNS-rebinding defense.
+  const badHost=await new Promise((resolve,reject)=>{const req=http.get(origin+'/api/state',{headers:{Host:'evil.example'}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);});
+  assert.equal(badHost,403);
+  assert.equal((await fetch(origin+'/api/products',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(product)})).status,403);
+  assert.equal((await fetch(origin+'/api/products',{method:'POST',headers:{'Content-Type':'application/json','X-D2C-Token':first.token,Origin:'https://evil.example'},body:JSON.stringify(product)})).status,403);
+  async function post(route,body){const r=await fetch(origin+route,{method:'POST',headers:{'Content-Type':'application/json','X-D2C-Token':first.token},body:JSON.stringify(body)});return{status:r.status,body:await r.json()};}
+  assert.equal((await post('/api/ai/login',{})).status,202);
+  assert.equal((await post('/api/ai/run',{kind:'trend',id:'queued'})).status,202);assert.equal(aiCalls[0].kind,'trend');
+  const p=await post('/api/products',product);assert.equal(p.status,201);
+  const trend=await post('/api/trends',{period:'keyword',query:'캠핑 요리'});assert.equal(trend.status,201);
+  const trendBrief=await fetch(origin+`/api/trends/${trend.body.id}/brief`).then(r=>r.json());assert.equal(trendBrief.products[0].id,p.body.id);
+  const appliedTrend=await post(`/api/trends/${trend.body.id}/apply`,{revision:1,summary:'광고에 참고할 동향입니다.',items:[{title:'캠핑 먹거리',summary:'검증된 요약',score:80,sources:[{title:'기사',url:'https://example.com/news',publishedAt:'2026-09-13'}],whyRelevant:'상품과 캠핑 메뉴가 연결됩니다.',productIds:[p.body.id],campaignAngle:'주말 캠핑 메뉴',channels:['instagram']}]});assert.equal(appliedTrend.body.status,'COMPLETED');
+  const c=await post('/api/campaigns',{productId:p.body.id});assert.equal(c.status,201);
+  const assetRes=await fetch(origin+'/api/assets',{method:'POST',headers:{'X-D2C-Token':first.token},body:imageBytes});assert.equal(assetRes.status,201);const asset=await assetRes.json();
+  const saved=await post(`/api/campaigns/${c.body.id}/save`,{revision:1,caption:'검증용 본문',assetId:asset.id});assert.equal(saved.status,200);
+  assert.equal((await post(`/api/campaigns/${c.body.id}/transition`,{revision:2,action:'review',confirmed:true})).status,200);
+  assert.equal((await post('/api/instagram/login',{})).status,202);
+  assert.equal((await post(`/api/campaigns/${c.body.id}/instagram-post`,{revision:3,confirmed:false})).status,409);
+  assert.equal((await post(`/api/campaigns/${c.body.id}/instagram-post`,{revision:3,confirmed:true})).status,202);
+  assert.deepEqual(instagramCalls.map(call=>call.action),['login','publish']);
+  instagramState={status:'PUBLISHING',action:'publish',campaignId:c.body.id};
+  assert.equal((await post(`/api/campaigns/${c.body.id}/save`,{revision:3,caption:'게시 중 변경'})).status,409);
+  instagramState={status:'COMPLETED',action:'publish',campaignId:c.body.id,revision:3,publishedInBrowser:true};
+  assert.equal((await post(`/api/campaigns/${c.body.id}/instagram-post`,{revision:3,confirmed:true})).status,409);
+  const download=await fetch(origin+`/api/campaigns/${c.body.id}/download/caption`);assert.equal(await download.text(),'검증용 본문');
+  const after=await fetch(origin+'/api/state').then(r=>r.json());assert.equal(after.campaigns[0].status,'READY');assert.equal(after.products.length,1);assert.equal(after.trends[0].items.length,1);
+  assert.equal((await post('/api/settings',{clientId:'blocked',clientSecret:'blocked'})).status,403);
+});
+test('HTTP API manages multiple stores and channel-specific browser posting without exposing secrets',async t=>{
+  const base=path.join(ROOT,'.test-output');fs.mkdirSync(base,{recursive:true});const dir=fs.mkdtempSync(path.join(base,'multi-http-'));
+  const syncCalls=[],socialCalls=[];
+  const sync=async(_store,config,kind)=>{syncCalls.push({id:config.storeId,secret:config.clientSecret,kind});return{storeId:config.storeId,products:1,newOrders:2,changedOrders:2};};
+  const socialState={instagram:{status:'NOT_CONFIGURED'},threads:{status:'COMPLETED',action:'login'},band:{status:'NOT_CONFIGURED'}};
+  const social={status:(_dir,channel)=>socialState[channel],start:(_dir,input)=>{socialCalls.push(input);return{status:'STARTING',...input};}};
+  const ai={status:()=>({status:'AI_READY',authenticated:true,authMode:'CHATGPT',message:'ready'}),start:()=>({status:'STARTING'}),login:()=>({status:'AI_READY'})};
+  const{server}=createServer({dataDir:dir,config:{port:4317,storeId:'legacy',storeName:'legacy',clientId:'',clientSecret:''},sync,social,ai});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));fs.rmSync(dir,{recursive:true,force:true});});
+  const origin=`http://127.0.0.1:${server.address().port}`,initial=await fetch(origin+'/api/state').then(r=>r.json());
+  async function post(route,body){const response=await fetch(origin+route,{method:'POST',headers:{'Content-Type':'application/json','X-D2C-Token':initial.token},body:JSON.stringify(body)});return{status:response.status,body:await response.json()};}
+  assert.equal((await post('/api/naver-stores',{id:'first',storeName:'첫 스토어',clientId:'first-id',clientSecret:'first-secret',enabled:true})).status,201);
+  assert.equal((await post('/api/naver-stores',{id:'second',storeName:'두 번째',clientId:'second-id',clientSecret:'second-secret',enabled:true})).status,201);
+  const state=await fetch(origin+'/api/state').then(r=>r.json());assert.equal(state.naverStores.length,2);assert.equal(JSON.stringify(state).includes('first-secret'),false);
+  const synced=await post('/api/sync',{kind:'all',storeId:'all'});assert.equal(synced.status,200);assert.equal(synced.body.products,2);assert.deepEqual(syncCalls.map(item=>item.id).sort(),['first','second']);assert.equal(syncCalls[0].secret.endsWith('-secret'),true);
+  assert.equal((await post('/api/social/band/settings',{targetUrl:'https://band.us/band/123?from=test'})).body.targetUrl,'https://band.us/band/123');
+  const p=await post('/api/products',product),c=await post('/api/campaigns',{productId:p.body.id,targetChannels:['threads']});
+  const assetResponse=await fetch(origin+'/api/assets',{method:'POST',headers:{'X-D2C-Token':initial.token},body:imageBytes}),asset=await assetResponse.json();
+  const saved=await post(`/api/campaigns/${c.body.id}/save`,{revision:1,caption:'Threads 검증',assetId:asset.id,targetChannels:['threads']});
+  await post(`/api/campaigns/${c.body.id}/transition`,{revision:saved.body.revision,action:'review',confirmed:true});
+  const posted=await post(`/api/campaigns/${c.body.id}/social/threads/post`,{revision:saved.body.revision+1,confirmed:true});assert.equal(posted.status,202);assert.equal(socialCalls[0].channel,'threads');
+});
