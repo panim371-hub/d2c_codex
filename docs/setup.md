@@ -6,8 +6,8 @@ GitHub 반영, 새 PC의 소스 다운로드, 최초 계정 연결을 순서대�
 
 ## Windows 실행
 
-1. Node.js 24 이상을 준비합니다. 개발에 사용한 버전은 24.15.0입니다.
-2. `codex_version` 폴더에서 `npm install`을 한 번 실행합니다. 공식 Codex SDK와 Playwright 실행 모듈이 함께 설치됩니다.
+1. Node.js 24 이상을 준비합니다. 개발에 사용한 버전은 24.15.0입니다. `start.bat`은 Windows PATH에 Node.js가 없으면 Codex 데스크톱에 번들된 Node.js 24 이상을 자동으로 찾아 사용합니다. 두 경로 모두에 Node.js가 없을 때만 별도 설치가 필요합니다.
+2. `codex_version` 폴더에서 `npm install`을 한 번 실행합니다. 공식 Codex SDK와 Playwright 실행 모듈이 함께 설치됩니다. 필요한 패키지가 없는 상태에서 `start.bat`을 실행해도, npm 또는 Codex 번들 pnpm을 찾을 수 있으면 의존성을 자동 설치합니다.
 3. Windows 탐색기에서 `start.bat`을 더블클릭합니다. 기본 브라우저에 로컬 화면이 열립니다. SNS 자동 게시를 쓸 때는 이 실행 방법을 사용해야 전용 브라우저가 외부 사이트에 접속할 수 있습니다.
 4. Codex에서 사용하려면 “codex_version 운영 화면을 내부 브라우저로 열어줘”라고 요청합니다.
 

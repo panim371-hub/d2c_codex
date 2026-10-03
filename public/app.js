@@ -61,10 +61,11 @@ async function refresh() {
 const current = () => state.campaigns.find(campaign => campaign.id === selected);
 
 function render() {
+  if (!state) return;
   const titles = { today:'오늘 할 일', studio:'마케팅 스튜디오', products:'상품 보관함', orders:'주문 · 수집 기록', connections:'연결 · 채널' };
   $('#view-title').textContent = titles[view];
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  const enabled = state.naverStores.filter(item => item.enabled && item.configured).length;
+  const enabled = (state.naverStores || []).filter(item => item.enabled && item.configured).length;
   $('#connection').textContent = enabled ? `네이버 ${enabled}개 연결` : '연결 준비';
   $('#connection').className = `pill ${enabled ? 'ready' : ''}`;
   const ai=$('#ai-connection');

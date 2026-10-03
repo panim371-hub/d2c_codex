@@ -6,6 +6,7 @@ import { ROOT, DATA } from '../src/config.mjs';
 import { Store } from '../src/store.mjs';
 import { assetPath } from '../src/assets.mjs';
 import { readSocialStatus, writeSocialStatus, socialDefinitions } from '../src/social.mjs';
+import { instagramCaptionName } from '../src/social-selectors.mjs';
 import { socialChannel } from '../src/validation.mjs';
 import { chromiumExecutable } from '../src/chromium.mjs';
 
@@ -132,7 +133,12 @@ async function postInstagram(page, image, caption) {
   const postOption = page.getByText(/^(게시물|Post)$/).first(); if (await postOption.isVisible().catch(() => false)) await postOption.click();
   const input = page.locator('input[type="file"]').first(); await input.waitFor({state:'attached',timeout:30000}); await input.setInputFiles(image); await page.waitForTimeout(2500);
   for (const stage of ['자르기','필터']) { await clickVisible([page.getByRole('button',{name:/^(다음|Next)$/}).first(),page.locator('div[role="dialog"] div[role="button"]').filter({hasText:/^(다음|Next)$/}).first()], `${stage} 단계의 다음 버튼을 찾지 못했습니다.`); await page.waitForTimeout(2000); }
-  await fillEditable(page.locator('div[aria-label="문구를 입력하세요..."], div[aria-label="Write a caption..."]').first(), caption);
+  const captionEditor = await waitVisible([
+    page.getByRole('textbox',{name:instagramCaptionName}).first(),
+    page.locator('div[role="dialog"] [contenteditable="true"][role="textbox"]').first(),
+    page.locator('[contenteditable="true"][role="textbox"]').first(),
+  ], 'Instagram 작성 화면에서 캡션 입력란을 찾지 못했습니다. Instagram 화면 구성이 바뀌었을 수 있습니다.');
+  await fillEditable(captionEditor, caption);
   update('PUBLISHING', '확인한 캠페인을 Instagram에 공유하고 있습니다. 이 단계에서는 다시 누르지 마세요.');
   await clickVisible([page.getByRole('button',{name:/^(공유하기|Share)$/}).first(),page.locator('div[role="dialog"] div[role="button"]').filter({hasText:/^(공유하기|Share)$/}).first()], '공유하기 버튼을 찾지 못했습니다.');
   await page.waitForFunction(() => { const value=document.body?.innerText||''; return value.includes('게시물이 공유되었습니다')||value.includes('Your post has been shared'); }, {timeout:60000});
